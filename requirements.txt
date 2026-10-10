@@ -1,0 +1,6 @@
+-r requirements-core.txt
+# ML stack. Install a CUDA build of torch first (https://pytorch.org/get-started/locally/)
+torch
+torchvision
+timm>=1.0
+PytorchWildlife

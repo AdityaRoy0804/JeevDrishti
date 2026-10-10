@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WildTrack AI</title>
+<link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+<style>
+:root{--bg:#0f1a14;--card:#16251c;--line:#25392d;--txt:#e8f0ea;--mut:#8fa596;--acc:#e8a33d;--ok:#4cc38a;--warn:#e8a33d;--bad:#e5645a}
+*{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,Segoe UI,sans-serif;background:var(--bg);color:var(--txt)}
+header{display:flex;align-items:center;gap:20px;padding:12px 24px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+header h1{margin:0;font-size:18px}header h1 span{color:var(--acc)}
+nav{display:flex;gap:6px;flex-wrap:wrap}nav button{background:none;border:0;color:var(--mut);padding:8px 12px;border-radius:8px;cursor:pointer;font:inherit}
+nav button.on{background:var(--card);color:var(--txt)}
+main{max-width:1100px;margin:0 auto;padding:24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+.grid{display:grid;gap:16px}.g4{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}.g2{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.kpi b{display:block;font-size:28px}.kpi span{color:var(--mut);font-size:13px}
+button.btn,.btn{background:var(--acc);color:#1a1405;border:0;border-radius:8px;padding:8px 14px;font-weight:600;cursor:pointer}
+.btn.sec{background:var(--line);color:var(--txt)}.btn.bad{background:var(--bad);color:#fff}.btn.ok{background:var(--ok);color:#06210f}
+input,select{background:#0c1510;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit}
+label{display:block;color:var(--mut);font-size:13px;margin:8px 0 4px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+.badge{display:inline-block;padding:3px 10px;border-radius:99px;font-size:12px;font-weight:700;text-transform:uppercase}
+.matched,.confirmed{background:var(--ok);color:#06210f}.review,.pending{background:var(--warn);color:#1a1405}
+.unknown,.rejected,.no_detection{background:var(--bad);color:#fff}.auto{background:var(--line)}
+.imgbox{position:relative;display:inline-block;max-width:100%}.imgbox img{max-width:100%;max-height:340px;border-radius:8px;display:block}
+.bbox{position:absolute;border:2px solid var(--acc);border-radius:4px}
+.thumb{width:110px;height:80px;object-fit:cover;border-radius:6px;border:1px solid var(--line)}
+.thumbs{display:flex;gap:8px;flex-wrap:wrap}.mut{color:var(--mut)}.warn{color:var(--warn)}
+table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid var(--line);text-align:left}
+.cand{display:flex;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
+.bar{height:6px;background:var(--line);border-radius:4px;flex:1}.bar i{display:block;height:100%;background:var(--acc);border-radius:4px}
+#map{height:480px;border-radius:12px;border:1px solid var(--line)}
+.hide{display:none}small{color:var(--mut)}
+</style>
+</head>
+<body>
+<header>
+  <h1>WildTrack <span>AI</span></h1>
+  <nav id="nav"></nav>
+  <small id="health" style="margin-left:auto"></small>
+</header>
+<main id="view"></main>
+<script src="/static/vendor/leaflet/leaflet.js"></script>
+<script>
+const KEY = localStorage.getItem('wt_key') || 'demo-key';
+const $ = (s, r=document) => r.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pct = v => v == null ? '–' : (v*100).toFixed(1)+'%';
+async function api(path, opts={}) {
+  opts.headers = {...(opts.headers||{}), 'X-API-Key': KEY};
+  const r = await fetch('/api'+path, opts);
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m } catch {} throw new Error(m); }
+  return r.json();
+}
+const badge = s => `<span class="badge ${esc(s)}">${esc(String(s).replace('_',' '))}</span>`;
+const TABS = {Dashboard, Identify, Animals, Review, Map: MapTab};
+let current = 'Dashboard', map = null;
+$('#nav').innerHTML = Object.keys(TABS).map(t => `<button data-t="${t}">${t}</button>`).join('');
+$('#nav').onclick = e => e.target.dataset.t && go(e.target.dataset.t);
+function go(t, arg) {
+  current = t; if (map) { map.remove(); map = null; }
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+  $('#view').innerHTML = '<p class="mut">Loading…</p>';
+  TABS[t](arg).catch(e => $('#view').innerHTML = `<div class="card warn">Error: ${esc(e.message)}</div>`);
+}
+api('/health').then(h => $('#health').textContent = `${h.detector} · ${h.embedder.split('/').pop()} · ${h.device} · ${h.index_size} vectors`).catch(()=>{});
+
+async function Dashboard() {
+  const s = await api('/analytics/summary');
+  const k = (n,l) => `<div class="card kpi"><b>${n}</b><span>${l}</span></div>`;
+  $('#view').innerHTML = `<div class="grid g4">${k(s.animals,'Enrolled animals')}${k(s.reference_images,'Reference images')}${k(s.sightings,'Sightings')}${k(s.pending,'Pending review')}${k(s.cameras,'Cameras')}</div>
+  <div class="card"><h3>Recent sightings</h3>${s.recent.length ? `<table><tr><th></th><th>Result</th><th>Animal</th><th>Camera</th><th>Time</th><th>Review</th></tr>${s.recent.map(r=>`<tr><td><img class="thumb" src="${r.image_url}"></td><td>${badge(r.status)}</td><td>${esc(r.animal_id||r.predicted_animal_id||'–')}</td><td>${esc(r.camera.id)}</td><td>${esc(r.timestamp)}</td><td>${badge(r.review_status)}</td></tr>`).join('')}</table>` : '<p class="mut">No sightings yet. Use Identify.</p>'}</div>
+  <p class="mut"><small>Similarity values are model scores, not calibrated probabilities. Camera coordinates are synthetic demo data.</small></p>`;
+}
+
+async function Identify() {
+  const cams = await api('/cameras');
+  $('#view').innerHTML = `<div class="card"><h3>Identify an animal</h3><div class="row">
+    <div><label>Camera-trap image</label><input type="file" id="f" accept="image/*"></div>
+    <div><label>Camera</label><select id="cam">${cams.map(c=>`<option>${esc(c.id)}</option>`).join('')}</select></div>
+    <div><label>Flank hint (optional)</label><select id="fl"><option value="">Any</option><option>left</option><option>right</option></select></div>
+    <button class="btn" id="go">Identify</button></div></div><div id="res"></div>`;
+  $('#go').onclick = async () => {
+    const f = $('#f').files[0]; if (!f) return alert('Choose an image first');
+    const fd = new FormData(); fd.append('image', f); fd.append('camera_id', $('#cam').value); fd.append('flank', $('#fl').value);
+    $('#res').innerHTML = '<p class="mut">Analysing…</p>';
+    try { renderResult(await api('/identify', {method:'POST', body: fd})); }
+    catch (e) { $('#res').innerHTML = `<div class="card warn">${esc(e.message)}</div>`; }
+  };
+}
+async function renderResult(r) {
+  const animals = await api('/animals');
+  const [w,h] = r.image_size, b = r.detection.bbox;
+  const box = b ? `<div class="bbox" style="left:${b[0]/w*100}%;top:${b[1]/h*100}%;width:${(b[2]-b[0])/w*100}%;height:${(b[3]-b[1])/h*100}%"></div>` : '';
+  const msg = {matched:'Likely match', review:'Ambiguous: needs human review', unknown:'No enrolled animal is similar enough: likely unknown', no_detection:'No animal detected in this image'}[r.status];
+  const cands = r.top_candidates.map((c,i) => `<div class="cand">
+    ${c.best_reference_image_url ? `<img class="thumb" src="${c.best_reference_image_url}">` : ''}
+    <div style="width:70px"><b>${esc(c.animal_id)}</b><br><small>${esc(c.best_reference_flank||'')}</small></div>
+    <div class="bar"><i style="width:${Math.max(0,Math.min(100,c.similarity*100))}%"></i></div><span>${c.similarity.toFixed(3)}</span></div>`).join('');
+  $('#res').innerHTML = `<div class="grid g2"><div class="card"><div class="imgbox"><img src="${r.image_url}">${box}</div>
+    <p><small>Detection confidence ${pct(r.detection.confidence)} · timestamp source: ${esc(r.timestamp_source)}</small></p></div>
+    <div class="card"><p>${badge(r.status)} <b>${msg}</b></p>
+    <p>Similarity <b>${r.similarity?.toFixed(3) ?? '–'}</b> · margin <b>${r.margin?.toFixed(3) ?? '–'}</b><br>
+    <small>Thresholds: match ≥ ${r.thresholds.match}, review ≥ ${r.thresholds.review}, margin ≥ ${r.thresholds.min_margin}. Model similarity score, not a probability.</small></p>
+    ${r.gallery_empty ? '<p class="warn">Gallery is empty. Enroll animals first.</p>' : ''}
+    ${cands || ''}
+    <div class="row" id="act" style="margin-top:12px">
+      ${r.predicted_animal_id ? `<button class="btn ok" data-a="confirm">Confirm ${esc(r.predicted_animal_id)}</button>` : ''}
+      <select id="re"><option value="">Reassign to…</option>${animals.map(a=>`<option>${esc(a.id)}</option>`).join('')}</select>
+      <button class="btn sec" data-a="reassign">Reassign</button>
+      <button class="btn bad" data-a="reject">Reject</button></div><p id="am" class="mut"></p></div></div>`;
+  $('#act').onclick = async e => {
+    const a = e.target.dataset.a; if (!a) return;
+    const body = {action: a, animal_id: $('#re').value || null};
+    try { const u = await api('/sightings/'+r.sighting_id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      $('#am').innerHTML = `Sighting #${u.id}: ${badge(u.review_status)} ${esc(u.animal_id||'')}`; }
+    catch (err) { $('#am').textContent = err.message; }
+  };
+}
+
+async function Animals(code) {
+  if (code) return Profile(code);
+  const list = await api('/animals');
+  $('#view').innerHTML = `<div class="card"><h3>Register a new individual</h3><div class="row">
+    <div><label>Sex (optional)</label><select id="sex"><option value="">Unknown</option><option>Male</option><option>Female</option></select></div>
+    <button class="btn" id="mk">Create profile</button></div><small>The system assigns an internal ID (e.g. T-001). These are not official wildlife IDs.</small></div>
+    <div class="grid g4">${list.map(a=>`<div class="card" style="cursor:pointer" data-c="${esc(a.id)}">
+      ${a.thumbnail_url?`<img class="thumb" style="width:100%;height:110px" src="${a.thumbnail_url}">`:''}
+      <h3 style="margin:8px 0 2px">${esc(a.id)}</h3><small>${esc(a.species)} ${esc(a.sex||'')}</small><br>
+      <small>L ${a.flank_coverage.left} · R ${a.flank_coverage.right} · ${a.sighting_count} sightings</small>
+      ${a.warnings.map(w=>`<br><small class="warn">⚠ ${esc(w)}</small>`).join('')}</div>`).join('')}</div>`;
+  $('#mk').onclick = async () => { const a = await api('/animals', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({sex: $('#sex').value||null})}); go('Animals', a.id); };
+  $('#view').onclick = e => { const c = e.target.closest('[data-c]'); if (c) go('Animals', c.dataset.c); };
+}
+async function Profile(code) {
+  const [a, sg] = await Promise.all([api('/animals/'+code), api(`/animals/${code}/sightings`)]);
+  const grp = f => a.references.filter(r=>r.flank===f);
+  $('#view').innerHTML = `<p><a href="#" id="back" style="color:var(--acc)">← All animals</a></p>
+  <div class="card"><h2 style="margin-top:0">${esc(a.id)} <small>${esc(a.species)} ${esc(a.sex||'')}</small></h2>
+  <p>${a.sighting_count} confirmed sightings · first ${esc(a.first_seen||'–')} · last ${esc(a.last_seen||'–')}</p>
+  ${a.warnings.map(w=>`<p class="warn">⚠ ${esc(w)} — a query from that side cannot be matched reliably.</p>`).join('')}</div>
+  <div class="card"><h3>Reference images</h3>
+  ${['left','right','unknown'].map(f=>`<p class="mut">${f} flank (${grp(f).length})</p><div class="thumbs">${grp(f).map(r=>`<img class="thumb" src="${r.image_url}">`).join('')||'<small>none</small>'}</div>`).join('')}
+  <h4>Add reference images</h4><div class="row"><input type="file" id="rf" multiple accept="image/*">
+  <select id="rfl"><option>left</option><option>right</option><option>unknown</option></select><button class="btn" id="up">Upload</button></div><p id="um" class="mut"></p></div>
+  <div class="card"><h3>Sighting timeline</h3>${sg.length?`<table>${sg.map(s=>`<tr><td><img class="thumb" src="${s.image_url}"></td><td>${esc(s.timestamp)}</td><td>${esc(s.camera.id)}</td><td>${badge(s.review_status)}</td><td>${s.similarity?.toFixed(3)??''}</td></tr>`).join('')}</table>`:'<p class="mut">No sightings yet.</p>'}</div>`;
+  $('#back').onclick = e => { e.preventDefault(); go('Animals'); };
+  $('#up').onclick = async () => {
+    const files = [...$('#rf').files]; if (!files.length) return; let msgs = [];
+    for (const f of files) { const fd = new FormData(); fd.append('image', f); fd.append('flank', $('#rfl').value);
+      try { const r = await api(`/animals/${code}/references`, {method:'POST', body: fd}); msgs.push(r.duplicate ? `${f.name}: duplicate, skipped` : `${f.name}: added`); }
+      catch (e) { msgs.push(`${f.name}: ${e.message}`); } $('#um').textContent = msgs.join(' · '); }
+    setTimeout(() => go('Animals', code), 800);
+  };
+}
+
+async function Review() {
+  const list = await api('/sightings?review_status=pending'), animals = await api('/animals');
+  const q = list.filter(s => s.status !== 'no_detection');
+  $('#view').innerHTML = `<h3>Pending review (${q.length})</h3>` + (q.map(s => `<div class="card" data-id="${s.id}"><div class="grid g2">
+    <div><img class="thumb" style="width:100%;height:auto;max-height:260px" src="${s.image_url}"></div>
+    <div>${badge(s.status)} <b>#${s.id}</b> · ${esc(s.camera.id)} · ${esc(s.timestamp)}<br><small>sim ${s.similarity?.toFixed(3)} · margin ${s.margin?.toFixed(3)} · flank hint ${esc(s.flank||'none')}</small>
+    ${s.top_candidates.map(c=>`<div class="cand">${c.best_reference_image_url?`<img class="thumb" src="${c.best_reference_image_url}">`:''}<b>${esc(c.animal_id)}</b><span>${c.similarity.toFixed(3)}</span></div>`).join('')}
+    <div class="row">${s.predicted_animal_id?`<button class="btn ok" data-a="confirm">Confirm ${esc(s.predicted_animal_id)}</button>`:''}
+    <select>${'<option value="">Reassign to…</option>'+animals.map(a=>`<option>${esc(a.id)}</option>`).join('')}</select>
+    <button class="btn sec" data-a="reassign">Reassign</button><button class="btn bad" data-a="reject">Reject</button></div></div></div></div>`).join('') || '<p class="mut">Nothing to review.</p>');
+  $('#view').onclick = async e => { const a = e.target.dataset.a; if (!a) return; const card = e.target.closest('[data-id]');
+    try { await api('/sightings/'+card.dataset.id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:a, animal_id: card.querySelector('select').value||null})}); go('Review'); }
+    catch (err) { alert(err.message); } };
+}
+
+async function MapTab() {
+  const [cams, animals] = await Promise.all([api('/cameras'), api('/animals')]);
+  $('#view').innerHTML = `<div class="row" style="margin-bottom:12px"><div><label>Show movement of</label><select id="an"><option value="">— cameras only —</option>${animals.map(a=>`<option>${esc(a.id)}</option>`).join('')}</select></div></div><div id="map"></div>
+  <p><small>Camera coordinates are synthetic and rounded. Movement paths connect confirmed sightings in time order and are not evidence of real animal movement in this demo.</small></p>`;
+  map = L.map('map').setView([cams[0].latitude, cams[0].longitude], 10);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution: '© OpenStreetMap', maxZoom: 18}).addTo(map);
+  const layer = L.layerGroup().addTo(map);
+  const draw = async code => {
+    layer.clearLayers();
+    cams.forEach(c => L.circleMarker([c.latitude, c.longitude], {radius: 7, color: '#e8a33d'}).bindTooltip(`${c.id} · ${c.zone||''}`).addTo(layer));
+    if (!code) return;
+    const mv = await api('/analytics/movement/'+code);
+    if (mv.length) { const pts = mv.map(m => [m.latitude, m.longitude]);
+      L.polyline(pts, {color:'#4cc38a', weight:3}).addTo(layer);
+      mv.forEach((m,i) => L.marker(pts[i]).bindTooltip(`#${i+1} ${m.camera_id}<br>${m.timestamp}`).addTo(layer)); map.fitBounds(pts, {padding:[40,40], maxZoom: 12}); }
+  };
+  $('#an').onchange = e => draw(e.target.value); draw('');
+}
+go('Dashboard');
+</script>
+</body>
+</html>
